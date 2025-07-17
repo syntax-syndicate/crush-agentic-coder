@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -59,6 +60,9 @@ type editorCmp struct {
 	currentQuery          string
 	completionsStartIndex int
 	isCompletionsOpen     bool
+
+	// history
+	promptHistoryIndex int
 }
 
 var DeleteKeyMaps = DeleteAttachmentKeyMaps{
@@ -266,6 +270,26 @@ func (m *editorCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key.Matches(msg, m.keyMap.Newline) {
 			m.textarea.InsertRune('\n')
 		}
+		// history
+		if key.Matches(msg, m.keyMap.Previous) {
+			userMessages, _ := m.getUserMessages(context.Background())
+			if m.promptHistoryIndex == 0 {
+				m.promptHistoryIndex = len(userMessages) - 1
+			} else {
+				m.promptHistoryIndex -= 1
+			}
+			m.textarea.SetValue(userMessages[m.promptHistoryIndex].Content().Text)
+		}
+		if key.Matches(msg, m.keyMap.Next) {
+			userMessages, _ := m.getUserMessages(context.Background())
+			if m.promptHistoryIndex == len(userMessages)-1 {
+				m.promptHistoryIndex = 0
+			} else {
+				m.promptHistoryIndex += 1
+			}
+			m.textarea.SetValue(userMessages[m.promptHistoryIndex].Content().Text)
+		}
+
 		// Handle Enter key
 		if m.textarea.Focused() && key.Matches(msg, m.keyMap.SendMessage) {
 			value := m.textarea.Value()
@@ -432,4 +456,42 @@ func New(app *app.App) Editor {
 		textarea: ta,
 		keyMap:   DefaultEditorKeyMap(),
 	}
+}
+
+func (m *editorCmp) getUserMessages(ctx context.Context) ([]message.Message, error) {
+	allMessages, err := m.app.Messages.List(ctx, m.session.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var userMessages []message.Message
+	for _, msg := range allMessages {
+		if msg.Role == message.User {
+			userMessages = append(userMessages, msg)
+		}
+	}
+	return userMessages, nil
+}
+
+func (m *editorCmp) handleMessageHistory(msg tea.KeyMsg) string {
+	ctx := context.Background()
+	// TODO don't ignore errors
+	userMessages, _ := m.getUserMessages(ctx)
+	if len(userMessages) > 0 {
+		if key.Matches(msg, m.keyMap.Previous) {
+			if m.promptHistoryIndex == 0 {
+				m.promptHistoryIndex = len(userMessages) - 1
+			} else {
+				m.promptHistoryIndex -= 1
+			}
+		}
+		if key.Matches(msg, m.keyMap.Next) {
+			if m.promptHistoryIndex == len(userMessages)-1 {
+				m.promptHistoryIndex = 0
+			} else {
+				m.promptHistoryIndex += 1
+			}
+		}
+	}
+	return userMessages[m.promptHistoryIndex].Content().Text
 }
