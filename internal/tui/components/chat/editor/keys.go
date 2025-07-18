@@ -54,6 +54,9 @@ func (k EditorKeyMap) KeyBindings() []key.Binding {
 		k.Newline,
 		k.Next,
 		k.Previous,
+		AttachmentsKeyMaps.AttachmentDeleteMode,
+		AttachmentsKeyMaps.DeleteAllAttachments,
+		AttachmentsKeyMaps.Escape,
 	}
 }
 
