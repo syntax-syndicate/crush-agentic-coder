@@ -5,29 +5,38 @@ import (
 	"slices"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
+	"github.com/charmbracelet/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/fur/provider"
-	"github.com/charmbracelet/crush/internal/tui/components/completions"
-	"github.com/charmbracelet/crush/internal/tui/components/core/list"
-	"github.com/charmbracelet/crush/internal/tui/components/dialogs/commands"
+	"github.com/charmbracelet/crush/internal/tui/exp/list"
 	"github.com/charmbracelet/crush/internal/tui/styles"
 	"github.com/charmbracelet/crush/internal/tui/util"
-	"github.com/charmbracelet/lipgloss/v2"
 )
 
+type listModel = list.FilterableGroupList[list.CompletionItem[ModelOption]]
+
 type ModelListComponent struct {
-	list      list.ListModel
+	list      listModel
 	modelType int
-	providers []provider.Provider
+	providers []catwalk.Provider
 }
 
-func NewModelListComponent(keyMap list.KeyMap, inputStyle lipgloss.Style, inputPlaceholder string) *ModelListComponent {
-	modelList := list.New(
-		list.WithFilterable(true),
+func NewModelListComponent(keyMap list.KeyMap, inputPlaceholder string, shouldResize bool) *ModelListComponent {
+	t := styles.CurrentTheme()
+	inputStyle := t.S().Base.PaddingLeft(1).PaddingBottom(1)
+	options := []list.ListOption{
 		list.WithKeyMap(keyMap),
-		list.WithInputStyle(inputStyle),
+		list.WithWrapNavigation(),
+	}
+	if shouldResize {
+		options = append(options, list.WithResizeByList())
+	}
+	modelList := list.NewFilterableGroupedList(
+		[]list.Group[list.CompletionItem[ModelOption]]{},
+		list.WithFilterInputStyle(inputStyle),
 		list.WithFilterPlaceholder(inputPlaceholder),
-		list.WithWrapNavigation(true),
+		list.WithFilterListOptions(
+			options...,
+		),
 	)
 
 	return &ModelListComponent{
@@ -51,7 +60,7 @@ func (m *ModelListComponent) Init() tea.Cmd {
 
 func (m *ModelListComponent) Update(msg tea.Msg) (*ModelListComponent, tea.Cmd) {
 	u, cmd := m.list.Update(msg)
-	m.list = u.(list.ListModel)
+	m.list = u.(listModel)
 	return m, cmd
 }
 
@@ -67,21 +76,23 @@ func (m *ModelListComponent) SetSize(width, height int) tea.Cmd {
 	return m.list.SetSize(width, height)
 }
 
-func (m *ModelListComponent) Items() []util.Model {
-	return m.list.Items()
-}
-
-func (m *ModelListComponent) SelectedIndex() int {
-	return m.list.SelectedIndex()
+func (m *ModelListComponent) SelectedModel() *ModelOption {
+	s := m.list.SelectedItem()
+	if s == nil {
+		return nil
+	}
+	sv := *s
+	model := sv.Value()
+	return &model
 }
 
 func (m *ModelListComponent) SetModelType(modelType int) tea.Cmd {
 	t := styles.CurrentTheme()
 	m.modelType = modelType
 
-	modelItems := []util.Model{}
+	var groups []list.Group[list.CompletionItem[ModelOption]]
 	// first none section
-	selectIndex := 1
+	selectedItemID := ""
 
 	cfg := config.Get()
 	var currentModel config.SelectedModel
@@ -103,25 +114,25 @@ func (m *ModelListComponent) SetModelType(modelType int) tea.Cmd {
 	if err != nil {
 		return util.ReportError(err)
 	}
-	for providerID, providerConfig := range cfg.Providers {
+	for providerID, providerConfig := range cfg.Providers.Seq2() {
 		if providerConfig.Disable {
 			continue
 		}
 
 		// Check if this provider is not in the known providers list
-		if !slices.ContainsFunc(knownProviders, func(p provider.Provider) bool { return p.ID == provider.InferenceProvider(providerID) }) {
+		if !slices.ContainsFunc(knownProviders, func(p catwalk.Provider) bool { return p.ID == catwalk.InferenceProvider(providerID) }) {
 			// Convert config provider to provider.Provider format
-			configProvider := provider.Provider{
+			configProvider := catwalk.Provider{
 				Name:   providerConfig.Name,
-				ID:     provider.InferenceProvider(providerID),
-				Models: make([]provider.Model, len(providerConfig.Models)),
+				ID:     catwalk.InferenceProvider(providerID),
+				Models: make([]catwalk.Model, len(providerConfig.Models)),
 			}
 
 			// Convert models
 			for i, model := range providerConfig.Models {
-				configProvider.Models[i] = provider.Model{
+				configProvider.Models[i] = catwalk.Model{
 					ID:                     model.ID,
-					Model:                  model.Model,
+					Name:                   model.Name,
 					CostPer1MIn:            model.CostPer1MIn,
 					CostPer1MOut:           model.CostPer1MOut,
 					CostPer1MInCached:      model.CostPer1MInCached,
@@ -140,18 +151,28 @@ func (m *ModelListComponent) SetModelType(modelType int) tea.Cmd {
 			if name == "" {
 				name = string(configProvider.ID)
 			}
-			section := commands.NewItemSection(name)
+			section := list.NewItemSection(name)
 			section.SetInfo(configured)
-			modelItems = append(modelItems, section)
+			group := list.Group[list.CompletionItem[ModelOption]]{
+				Section: section,
+			}
 			for _, model := range configProvider.Models {
-				modelItems = append(modelItems, completions.NewCompletionItem(model.Model, ModelOption{
+				item := list.NewCompletionItem(model.Name, ModelOption{
 					Provider: configProvider,
 					Model:    model,
-				}))
+				},
+					list.WithCompletionID(
+						fmt.Sprintf("%s:%s", providerConfig.ID, model.ID),
+					),
+				)
+
+				group.Items = append(group.Items, item)
 				if model.ID == currentModel.Model && string(configProvider.ID) == currentModel.Provider {
-					selectIndex = len(modelItems) - 1 // Set the selected index to the current model
+					selectedItemID = item.ID()
 				}
 			}
+			groups = append(groups, group)
+
 			addedProviders[providerID] = true
 		}
 	}
@@ -164,7 +185,7 @@ func (m *ModelListComponent) SetModelType(modelType int) tea.Cmd {
 		}
 
 		// Check if this provider is configured and not disabled
-		if providerConfig, exists := cfg.Providers[string(provider.ID)]; exists && providerConfig.Disable {
+		if providerConfig, exists := cfg.Providers.Get(string(provider.ID)); exists && providerConfig.Disable {
 			continue
 		}
 
@@ -173,23 +194,43 @@ func (m *ModelListComponent) SetModelType(modelType int) tea.Cmd {
 			name = string(provider.ID)
 		}
 
-		section := commands.NewItemSection(name)
-		if _, ok := cfg.Providers[string(provider.ID)]; ok {
+		section := list.NewItemSection(name)
+		if _, ok := cfg.Providers.Get(string(provider.ID)); ok {
 			section.SetInfo(configured)
 		}
-		modelItems = append(modelItems, section)
+		group := list.Group[list.CompletionItem[ModelOption]]{
+			Section: section,
+		}
 		for _, model := range provider.Models {
-			modelItems = append(modelItems, completions.NewCompletionItem(model.Model, ModelOption{
+			item := list.NewCompletionItem(model.Name, ModelOption{
 				Provider: provider,
 				Model:    model,
-			}))
+			},
+				list.WithCompletionID(
+					fmt.Sprintf("%s:%s", provider.ID, model.ID),
+				),
+			)
+			group.Items = append(group.Items, item)
 			if model.ID == currentModel.Model && string(provider.ID) == currentModel.Provider {
-				selectIndex = len(modelItems) - 1 // Set the selected index to the current model
+				selectedItemID = item.ID()
 			}
 		}
+		groups = append(groups, group)
 	}
 
-	return tea.Sequence(m.list.SetItems(modelItems), m.list.SetSelected(selectIndex))
+	var cmds []tea.Cmd
+
+	cmd := m.list.SetGroups(groups)
+
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	cmd = m.list.SetSelected(selectedItemID)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	return tea.Sequence(cmds...)
 }
 
 // GetModelType returns the current model type
@@ -198,9 +239,9 @@ func (m *ModelListComponent) GetModelType() int {
 }
 
 func (m *ModelListComponent) SetInputPlaceholder(placeholder string) {
-	m.list.SetFilterPlaceholder(placeholder)
+	m.list.SetInputPlaceholder(placeholder)
 }
 
-func (m *ModelListComponent) SetProviders(providers []provider.Provider) {
+func (m *ModelListComponent) SetProviders(providers []catwalk.Provider) {
 	m.providers = providers
 }

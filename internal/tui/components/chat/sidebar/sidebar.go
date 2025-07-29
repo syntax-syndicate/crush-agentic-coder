@@ -4,15 +4,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
-	"sync"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
+	"github.com/charmbracelet/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/diff"
 	"github.com/charmbracelet/crush/internal/fsext"
-	"github.com/charmbracelet/crush/internal/fur/provider"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/lsp/protocol"
@@ -36,7 +37,7 @@ type FileHistory struct {
 	latestVersion  history.File
 }
 
-const LogoHeightBreakpoint = 40
+const LogoHeightBreakpoint = 30
 
 // Default maximum number of items to show in each section
 const (
@@ -71,8 +72,7 @@ type sidebarCmp struct {
 	lspClients    map[string]*lsp.Client
 	compactMode   bool
 	history       history.Service
-	// Using a sync map here because we might receive file history events concurrently
-	files sync.Map
+	files         *csync.Map[string, SessionFile]
 }
 
 func New(history history.Service, lspClients map[string]*lsp.Client, compact bool) Sidebar {
@@ -80,6 +80,7 @@ func New(history history.Service, lspClients map[string]*lsp.Client, compact boo
 		lspClients:  lspClients,
 		history:     history,
 		compactMode: compact,
+		files:       csync.NewMap[string, SessionFile](),
 	}
 }
 
@@ -90,9 +91,9 @@ func (m *sidebarCmp) Init() tea.Cmd {
 func (m *sidebarCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case SessionFilesMsg:
-		m.files = sync.Map{}
+		m.files = csync.NewMap[string, SessionFile]()
 		for _, file := range msg.Files {
-			m.files.Store(file.FilePath, file)
+			m.files.Set(file.FilePath, file)
 		}
 		return m, nil
 
@@ -114,12 +115,22 @@ func (m *sidebarCmp) View() string {
 	t := styles.CurrentTheme()
 	parts := []string{}
 
+	style := t.S().Base.
+		Width(m.width).
+		Height(m.height).
+		Padding(1)
+	if m.compactMode {
+		style = style.PaddingTop(0)
+	}
+
 	if !m.compactMode {
 		if m.height > LogoHeightBreakpoint {
 			parts = append(parts, m.logo)
 		} else {
 			// Use a smaller logo for smaller screens
-			parts = append(parts, m.smallerScreenLogo(), "")
+			parts = append(parts,
+				logo.SmallRender(m.width-style.GetHorizontalFrameSize()),
+				"")
 		}
 	}
 
@@ -159,13 +170,6 @@ func (m *sidebarCmp) View() string {
 		)
 	}
 
-	style := t.S().Base.
-		Width(m.width).
-		Height(m.height).
-		Padding(1)
-	if m.compactMode {
-		style = style.PaddingTop(0)
-	}
 	return style.Render(
 		lipgloss.JoinVertical(lipgloss.Left, parts...),
 	)
@@ -175,31 +179,30 @@ func (m *sidebarCmp) handleFileHistoryEvent(event pubsub.Event[history.File]) te
 	return func() tea.Msg {
 		file := event.Payload
 		found := false
-		m.files.Range(func(key, value any) bool {
-			existing := value.(SessionFile)
-			if existing.FilePath == file.Path {
-				if existing.History.latestVersion.Version < file.Version {
-					existing.History.latestVersion = file
-				} else if file.Version == 0 {
-					existing.History.initialVersion = file
-				} else {
-					// If the version is not greater than the latest, we ignore it
-					return true
-				}
-				before := existing.History.initialVersion.Content
-				after := existing.History.latestVersion.Content
-				path := existing.History.initialVersion.Path
-				cwd := config.Get().WorkingDir()
-				path = strings.TrimPrefix(path, cwd)
-				_, additions, deletions := diff.GenerateDiff(before, after, path)
-				existing.Additions = additions
-				existing.Deletions = deletions
-				m.files.Store(file.Path, existing)
-				found = true
-				return false
+		for existing := range m.files.Seq() {
+			if existing.FilePath != file.Path {
+				continue
 			}
-			return true
-		})
+			if existing.History.latestVersion.Version < file.Version {
+				existing.History.latestVersion = file
+			} else if file.Version == 0 {
+				existing.History.initialVersion = file
+			} else {
+				// If the version is not greater than the latest, we ignore it
+				continue
+			}
+			before := existing.History.initialVersion.Content
+			after := existing.History.latestVersion.Content
+			path := existing.History.initialVersion.Path
+			cwd := config.Get().WorkingDir()
+			path = strings.TrimPrefix(path, cwd)
+			_, additions, deletions := diff.GenerateDiff(before, after, path)
+			existing.Additions = additions
+			existing.Deletions = deletions
+			m.files.Set(file.Path, existing)
+			found = true
+			break
+		}
 		if found {
 			return nil
 		}
@@ -212,7 +215,7 @@ func (m *sidebarCmp) handleFileHistoryEvent(event pubsub.Event[history.File]) te
 			Additions: 0,
 			Deletions: 0,
 		}
-		m.files.Store(file.Path, sf)
+		m.files.Set(file.Path, sf)
 		return nil
 	}
 }
@@ -383,12 +386,7 @@ func (m *sidebarCmp) filesBlockCompact(maxWidth int) string {
 
 	section := t.S().Subtle.Render("Modified Files")
 
-	files := make([]SessionFile, 0)
-	m.files.Range(func(key, value any) bool {
-		file := value.(SessionFile)
-		files = append(files, file)
-		return true
-	})
+	files := slices.Collect(m.files.Seq())
 
 	if len(files) == 0 {
 		content := lipgloss.JoinVertical(
@@ -617,12 +615,7 @@ func (m *sidebarCmp) filesBlock() string {
 		core.Section("Modified Files", m.getMaxWidth()),
 	)
 
-	files := make([]SessionFile, 0)
-	m.files.Range(func(key, value any) bool {
-		file := value.(SessionFile)
-		files = append(files, file)
-		return true // continue iterating
-	})
+	files := slices.Collect(m.files.Seq())
 	if len(files) == 0 {
 		return lipgloss.JoinVertical(
 			lipgloss.Left,
@@ -689,7 +682,7 @@ func (m *sidebarCmp) filesBlock() string {
 	if totalFilesWithChanges > maxFiles {
 		remaining := totalFilesWithChanges - maxFiles
 		fileList = append(fileList,
-			t.S().Base.Foreground(t.FgMuted).Render(fmt.Sprintf("… and %d more", remaining)),
+			t.S().Base.Foreground(t.FgSubtle).Render(fmt.Sprintf("…and %d more", remaining)),
 		)
 	}
 
@@ -777,7 +770,7 @@ func (m *sidebarCmp) lspBlock() string {
 	if len(lsp) > maxLSPs {
 		remaining := len(lsp) - maxLSPs
 		lspList = append(lspList,
-			t.S().Base.Foreground(t.FgMuted).Render(fmt.Sprintf("… and %d more", remaining)),
+			t.S().Base.Foreground(t.FgSubtle).Render(fmt.Sprintf("…and %d more", remaining)),
 		)
 	}
 
@@ -834,7 +827,7 @@ func (m *sidebarCmp) mcpBlock() string {
 	if len(mcps) > maxMCPs {
 		remaining := len(mcps) - maxMCPs
 		mcpList = append(mcpList,
-			t.S().Base.Foreground(t.FgMuted).Render(fmt.Sprintf("… and %d more", remaining)),
+			t.S().Base.Foreground(t.FgSubtle).Render(fmt.Sprintf("…and %d more", remaining)),
 		)
 	}
 
@@ -894,7 +887,7 @@ func (s *sidebarCmp) currentModelBlock() string {
 	t := styles.CurrentTheme()
 
 	modelIcon := t.S().Base.Foreground(t.FgSubtle).Render(styles.ModelIcon)
-	modelName := t.S().Text.Render(model.Model)
+	modelName := t.S().Text.Render(model.Name)
 	modelInfo := fmt.Sprintf("%s %s", modelIcon, modelName)
 	parts := []string{
 		modelInfo,
@@ -902,14 +895,14 @@ func (s *sidebarCmp) currentModelBlock() string {
 	if model.CanReason {
 		reasoningInfoStyle := t.S().Subtle.PaddingLeft(2)
 		switch modelProvider.Type {
-		case provider.TypeOpenAI:
+		case catwalk.TypeOpenAI:
 			reasoningEffort := model.DefaultReasoningEffort
 			if selectedModel.ReasoningEffort != "" {
 				reasoningEffort = selectedModel.ReasoningEffort
 			}
 			formatter := cases.Title(language.English, cases.NoLower)
 			parts = append(parts, reasoningInfoStyle.Render(formatter.String(fmt.Sprintf("Reasoning %s", reasoningEffort))))
-		case provider.TypeAnthropic:
+		case catwalk.TypeAnthropic:
 			formatter := cases.Title(language.English, cases.NoLower)
 			if selectedModel.Think {
 				parts = append(parts, reasoningInfoStyle.Render(formatter.String("Thinking on")))
@@ -932,19 +925,6 @@ func (s *sidebarCmp) currentModelBlock() string {
 		lipgloss.Left,
 		parts...,
 	)
-}
-
-func (m *sidebarCmp) smallerScreenLogo() string {
-	t := styles.CurrentTheme()
-	title := t.S().Base.Foreground(t.Secondary).Render("Charm™")
-	title += " " + styles.ApplyBoldForegroundGrad("CRUSH", t.Secondary, t.Primary)
-	remainingWidth := m.width - lipgloss.Width(title) - 3
-	if remainingWidth > 0 {
-		char := "╱"
-		lines := strings.Repeat(char, remainingWidth)
-		title += " " + t.S().Base.Foreground(t.Primary).Render(lines)
-	}
-	return title
 }
 
 // SetSession implements Sidebar.

@@ -35,13 +35,13 @@ const (
 
 // Logger interface for optional logging
 type Logger interface {
-	InfoPersist(msg string, keysAndValues ...interface{})
+	InfoPersist(msg string, keysAndValues ...any)
 }
 
 // noopLogger is a logger that does nothing
 type noopLogger struct{}
 
-func (noopLogger) InfoPersist(msg string, keysAndValues ...interface{}) {}
+func (noopLogger) InfoPersist(msg string, keysAndValues ...any) {}
 
 // BlockFunc is a function that determines if a command should be blocked
 type BlockFunc func(args []string) bool
@@ -221,7 +221,7 @@ func (s *Shell) execPOSIX(ctx context.Context, command string) (string, string, 
 		interp.Interactive(false),
 		interp.Env(expand.ListEnviron(s.env...)),
 		interp.Dir(s.cwd),
-		interp.ExecHandlers(s.blockHandler()),
+		interp.ExecHandlers(s.blockHandler(), s.coreUtilsHandler()),
 	)
 	if err != nil {
 		return "", "", fmt.Errorf("could not run command: %w", err)
@@ -248,9 +248,9 @@ func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	status, ok := interp.IsExitStatus(err)
-	if ok {
-		return int(status)
+	var exitErr interp.ExitStatus
+	if errors.As(err, &exitErr) {
+		return int(exitErr)
 	}
 	return 1
 }

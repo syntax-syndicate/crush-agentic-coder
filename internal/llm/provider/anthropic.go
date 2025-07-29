@@ -15,8 +15,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/bedrock"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/charmbracelet/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/fur/provider"
 	"github.com/charmbracelet/crush/internal/llm/tools"
 	"github.com/charmbracelet/crush/internal/message"
 )
@@ -39,11 +39,39 @@ func newAnthropicClient(opts providerClientOptions, useBedrock bool) AnthropicCl
 
 func createAnthropicClient(opts providerClientOptions, useBedrock bool) anthropic.Client {
 	anthropicClientOptions := []option.RequestOption{}
-	if opts.apiKey != "" {
-		anthropicClientOptions = append(anthropicClientOptions, option.WithAPIKey(opts.apiKey))
+
+	// Check if Authorization header is provided in extra headers
+	hasBearerAuth := false
+	if opts.extraHeaders != nil {
+		for key := range opts.extraHeaders {
+			if strings.ToLower(key) == "authorization" {
+				hasBearerAuth = true
+				break
+			}
+		}
+	}
+
+	isBearerToken := strings.HasPrefix(opts.apiKey, "Bearer ")
+
+	if opts.apiKey != "" && !hasBearerAuth {
+		if isBearerToken {
+			slog.Debug("API key starts with 'Bearer ', using as Authorization header")
+			anthropicClientOptions = append(anthropicClientOptions, option.WithHeader("Authorization", opts.apiKey))
+		} else {
+			// Use standard X-Api-Key header
+			anthropicClientOptions = append(anthropicClientOptions, option.WithAPIKey(opts.apiKey))
+		}
+	} else if hasBearerAuth {
+		slog.Debug("Skipping X-Api-Key header because Authorization header is provided")
 	}
 	if useBedrock {
 		anthropicClientOptions = append(anthropicClientOptions, bedrock.WithLoadDefaultConfig(context.Background()))
+	}
+	for _, header := range opts.extraHeaders {
+		anthropicClientOptions = append(anthropicClientOptions, option.WithHeaderAdd(header, opts.extraHeaders[header]))
+	}
+	for key, value := range opts.extraBody {
+		anthropicClientOptions = append(anthropicClientOptions, option.WithJSONSet(key, value))
 	}
 	return anthropic.NewClient(anthropicClientOptions...)
 }
@@ -65,7 +93,7 @@ func (a *anthropicClient) convertMessages(messages []message.Message) (anthropic
 			var contentBlocks []anthropic.ContentBlockParamUnion
 			contentBlocks = append(contentBlocks, content)
 			for _, binaryContent := range msg.BinaryContent() {
-				base64Image := binaryContent.String(provider.InferenceProviderAnthropic)
+				base64Image := binaryContent.String(catwalk.InferenceProviderAnthropic)
 				imageBlock := anthropic.NewImageBlockBase64(binaryContent.MIMEType, base64Image)
 				contentBlocks = append(contentBlocks, imageBlock)
 			}
@@ -157,6 +185,15 @@ func (a *anthropicClient) finishReason(reason string) message.FinishReason {
 	}
 }
 
+func (a *anthropicClient) isThinkingEnabled() bool {
+	cfg := config.Get()
+	modelConfig := cfg.Models[config.SelectedModelTypeLarge]
+	if a.providerOptions.modelType == config.SelectedModelTypeSmall {
+		modelConfig = cfg.Models[config.SelectedModelTypeSmall]
+	}
+	return a.Model().CanReason && modelConfig.Think
+}
+
 func (a *anthropicClient) preparedMessages(messages []anthropic.MessageParam, tools []anthropic.ToolUnionParam) anthropic.MessageNewParams {
 	model := a.providerOptions.model(a.providerOptions.modelType)
 	var thinkingParam anthropic.ThinkingConfigParamUnion
@@ -171,7 +208,7 @@ func (a *anthropicClient) preparedMessages(messages []anthropic.MessageParam, to
 	if modelConfig.MaxTokens > 0 {
 		maxTokens = modelConfig.MaxTokens
 	}
-	if a.Model().CanReason && modelConfig.Think {
+	if a.isThinkingEnabled() {
 		thinkingParam = anthropic.ThinkingConfigParamOfEnabled(int64(float64(maxTokens) * 0.8))
 		temperature = anthropic.Float(1)
 	}
@@ -185,6 +222,25 @@ func (a *anthropicClient) preparedMessages(messages []anthropic.MessageParam, to
 		maxTokens = int64(a.adjustedMaxTokens)
 	}
 
+	systemBlocks := []anthropic.TextBlockParam{}
+
+	// Add custom system prompt prefix if configured
+	if a.providerOptions.systemPromptPrefix != "" {
+		systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
+			Text: a.providerOptions.systemPromptPrefix,
+			CacheControl: anthropic.CacheControlEphemeralParam{
+				Type: "ephemeral",
+			},
+		})
+	}
+
+	systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
+		Text: a.providerOptions.systemMessage,
+		CacheControl: anthropic.CacheControlEphemeralParam{
+			Type: "ephemeral",
+		},
+	})
+
 	return anthropic.MessageNewParams{
 		Model:       anthropic.Model(model.ID),
 		MaxTokens:   maxTokens,
@@ -192,14 +248,7 @@ func (a *anthropicClient) preparedMessages(messages []anthropic.MessageParam, to
 		Messages:    messages,
 		Tools:       tools,
 		Thinking:    thinkingParam,
-		System: []anthropic.TextBlockParam{
-			{
-				Text: a.providerOptions.systemMessage,
-				CacheControl: anthropic.CacheControlEphemeralParam{
-					Type: "ephemeral",
-				},
-			},
-		},
+		System:      systemBlocks,
 	}
 }
 
@@ -216,9 +265,14 @@ func (a *anthropicClient) send(ctx context.Context, messages []message.Message, 
 			slog.Debug("Prepared messages", "messages", string(jsonData))
 		}
 
+		var opts []option.RequestOption
+		if a.isThinkingEnabled() {
+			opts = append(opts, option.WithHeaderAdd("anthropic-beta", "interleaved-thinking-2025-05-14"))
+		}
 		anthropicResponse, err := a.client.Messages.New(
 			ctx,
 			preparedMessages,
+			opts...,
 		)
 		// If there is an error we are going to see if we can retry the call
 		if err != nil {
@@ -228,7 +282,7 @@ func (a *anthropicClient) send(ctx context.Context, messages []message.Message, 
 				return nil, retryErr
 			}
 			if retry {
-				slog.Warn(fmt.Sprintf("Retrying due to rate limit... attempt %d of %d", attempts, maxRetries))
+				slog.Warn("Retrying due to rate limit", "attempt", attempts, "max_retries", maxRetries)
 				select {
 				case <-ctx.Done():
 					return nil, ctx.Err()
@@ -268,10 +322,15 @@ func (a *anthropicClient) stream(ctx context.Context, messages []message.Message
 				slog.Debug("Prepared messages", "messages", string(jsonData))
 			}
 
+			var opts []option.RequestOption
+			if a.isThinkingEnabled() {
+				opts = append(opts, option.WithHeaderAdd("anthropic-beta", "interleaved-thinking-2025-05-14"))
+			}
+
 			anthropicStream := a.client.Messages.NewStreaming(
 				ctx,
 				preparedMessages,
-				option.WithHeaderAdd("anthropic-beta", "interleaved-thinking-2025-05-14"),
+				opts...,
 			)
 			accumulatedMessage := anthropic.Message{}
 
@@ -368,6 +427,7 @@ func (a *anthropicClient) stream(ctx context.Context, messages []message.Message
 				close(eventChan)
 				return
 			}
+
 			// If there is an error we are going to see if we can retry the call
 			retry, after, retryErr := a.shouldRetry(attempts, err)
 			if retryErr != nil {
@@ -376,7 +436,7 @@ func (a *anthropicClient) stream(ctx context.Context, messages []message.Message
 				return
 			}
 			if retry {
-				slog.Warn(fmt.Sprintf("Retrying due to rate limit... attempt %d of %d", attempts, maxRetries))
+				slog.Warn("Retrying due to rate limit", "attempt", attempts, "max_retries", maxRetries)
 				select {
 				case <-ctx.Done():
 					// context cancelled
@@ -504,6 +564,6 @@ func (a *anthropicClient) usage(msg anthropic.Message) TokenUsage {
 	}
 }
 
-func (a *anthropicClient) Model() provider.Model {
+func (a *anthropicClient) Model() catwalk.Model {
 	return a.providerOptions.model(a.providerOptions.modelType)
 }

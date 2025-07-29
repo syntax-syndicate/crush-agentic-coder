@@ -3,16 +3,17 @@ package config
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/catwalk/pkg/catwalk"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
-	"github.com/charmbracelet/crush/internal/fur/provider"
 	"github.com/tidwall/sjson"
-	"golang.org/x/exp/slog"
 )
 
 const (
@@ -70,20 +71,25 @@ type ProviderConfig struct {
 	// The provider's API endpoint.
 	BaseURL string `json:"base_url,omitempty"`
 	// The provider type, e.g. "openai", "anthropic", etc. if empty it defaults to openai.
-	Type provider.Type `json:"type,omitempty"`
+	Type catwalk.Type `json:"type,omitempty"`
 	// The provider's API key.
 	APIKey string `json:"api_key,omitempty"`
 	// Marks the provider as disabled.
 	Disable bool `json:"disable,omitempty"`
 
+	// Custom system prompt prefix.
+	SystemPromptPrefix string `json:"system_prompt_prefix,omitempty"`
+
 	// Extra headers to send with each request to the provider.
 	ExtraHeaders map[string]string `json:"extra_headers,omitempty"`
+	// Extra body
+	ExtraBody map[string]any `json:"extra_body,omitempty"`
 
 	// Used to pass extra parameters to the provider.
 	ExtraParams map[string]string `json:"-"`
 
 	// The provider models
-	Models []provider.Model `json:"models,omitempty"`
+	Models []catwalk.Model `json:"models,omitempty"`
 }
 
 type MCPType string
@@ -118,14 +124,18 @@ type TUIOptions struct {
 	// Here we can add themes later or any TUI related options
 }
 
+type Permissions struct {
+	AllowedTools []string `json:"allowed_tools,omitempty"` // Tools that don't require permission prompts
+	SkipRequests bool     `json:"-"`                       // Automatically accept all permissions (YOLO mode)
+}
+
 type Options struct {
-	ContextPaths            []string    `json:"context_paths,omitempty"`
-	TUI                     *TUIOptions `json:"tui,omitempty"`
-	Debug                   bool        `json:"debug,omitempty"`
-	DebugLSP                bool        `json:"debug_lsp,omitempty"`
-	DisableAutoSummarize    bool        `json:"disable_auto_summarize,omitempty"`
-	DataDirectory           string      `json:"data_directory,omitempty"` // Relative to the cwd
-	SkipPermissionsRequests bool        `json:"-"`                        // Automatically accept all permissions (YOLO mode)
+	ContextPaths         []string    `json:"context_paths,omitempty"`
+	TUI                  *TUIOptions `json:"tui,omitempty"`
+	Debug                bool        `json:"debug,omitempty"`
+	DebugLSP             bool        `json:"debug_lsp,omitempty"`
+	DisableAutoSummarize bool        `json:"disable_auto_summarize,omitempty"`
+	DataDirectory        string      `json:"data_directory,omitempty"` // Relative to the cwd
 }
 
 type MCPs map[string]MCPConfig
@@ -234,7 +244,7 @@ type Config struct {
 	Models map[SelectedModelType]SelectedModel `json:"models,omitempty"`
 
 	// The providers that are configured
-	Providers map[string]ProviderConfig `json:"providers,omitempty"`
+	Providers *csync.Map[string, ProviderConfig] `json:"providers,omitempty"`
 
 	MCP MCPs `json:"mcp,omitempty"`
 
@@ -242,14 +252,16 @@ type Config struct {
 
 	Options *Options `json:"options,omitempty"`
 
+	Permissions *Permissions `json:"permissions,omitempty"`
+
 	// Internal
 	workingDir string `json:"-"`
 	// TODO: most likely remove this concept when I come back to it
 	Agents map[string]Agent `json:"-"`
 	// TODO: find a better way to do this this should probably not be part of the config
 	resolver       VariableResolver
-	dataConfigDir  string              `json:"-"`
-	knownProviders []provider.Provider `json:"-"`
+	dataConfigDir  string             `json:"-"`
+	knownProviders []catwalk.Provider `json:"-"`
 }
 
 func (c *Config) WorkingDir() string {
@@ -257,8 +269,8 @@ func (c *Config) WorkingDir() string {
 }
 
 func (c *Config) EnabledProviders() []ProviderConfig {
-	enabled := make([]ProviderConfig, 0, len(c.Providers))
-	for _, p := range c.Providers {
+	var enabled []ProviderConfig
+	for p := range c.Providers.Seq() {
 		if !p.Disable {
 			enabled = append(enabled, p)
 		}
@@ -271,8 +283,8 @@ func (c *Config) IsConfigured() bool {
 	return len(c.EnabledProviders()) > 0
 }
 
-func (c *Config) GetModel(provider, model string) *provider.Model {
-	if providerConfig, ok := c.Providers[provider]; ok {
+func (c *Config) GetModel(provider, model string) *catwalk.Model {
+	if providerConfig, ok := c.Providers.Get(provider); ok {
 		for _, m := range providerConfig.Models {
 			if m.ID == model {
 				return &m
@@ -287,13 +299,13 @@ func (c *Config) GetProviderForModel(modelType SelectedModelType) *ProviderConfi
 	if !ok {
 		return nil
 	}
-	if providerConfig, ok := c.Providers[model.Provider]; ok {
+	if providerConfig, ok := c.Providers.Get(model.Provider); ok {
 		return &providerConfig
 	}
 	return nil
 }
 
-func (c *Config) GetModelByType(modelType SelectedModelType) *provider.Model {
+func (c *Config) GetModelByType(modelType SelectedModelType) *catwalk.Model {
 	model, ok := c.Models[modelType]
 	if !ok {
 		return nil
@@ -301,7 +313,7 @@ func (c *Config) GetModelByType(modelType SelectedModelType) *provider.Model {
 	return c.GetModel(model.Provider, model.Model)
 }
 
-func (c *Config) LargeModel() *provider.Model {
+func (c *Config) LargeModel() *catwalk.Model {
 	model, ok := c.Models[SelectedModelTypeLarge]
 	if !ok {
 		return nil
@@ -309,7 +321,7 @@ func (c *Config) LargeModel() *provider.Model {
 	return c.GetModel(model.Provider, model.Model)
 }
 
-func (c *Config) SmallModel() *provider.Model {
+func (c *Config) SmallModel() *catwalk.Model {
 	model, ok := c.Models[SelectedModelTypeSmall]
 	if !ok {
 		return nil
@@ -368,18 +380,14 @@ func (c *Config) SetProviderAPIKey(providerID, apiKey string) error {
 		return fmt.Errorf("failed to save API key to config file: %w", err)
 	}
 
-	if c.Providers == nil {
-		c.Providers = make(map[string]ProviderConfig)
-	}
-
-	providerConfig, exists := c.Providers[providerID]
+	providerConfig, exists := c.Providers.Get(providerID)
 	if exists {
 		providerConfig.APIKey = apiKey
-		c.Providers[providerID] = providerConfig
+		c.Providers.Set(providerID, providerConfig)
 		return nil
 	}
 
-	var foundProvider *provider.Provider
+	var foundProvider *catwalk.Provider
 	for _, p := range c.knownProviders {
 		if string(p.ID) == providerID {
 			foundProvider = &p
@@ -404,7 +412,7 @@ func (c *Config) SetProviderAPIKey(providerID, apiKey string) error {
 		return fmt.Errorf("provider with ID %s not found in known providers", providerID)
 	}
 	// Store the updated provider config
-	c.Providers[providerID] = providerConfig
+	c.Providers.Set(providerID, providerConfig)
 	return nil
 }
 
@@ -448,14 +456,14 @@ func (c *ProviderConfig) TestConnection(resolver VariableResolver) error {
 	headers := make(map[string]string)
 	apiKey, _ := resolver.ResolveValue(c.APIKey)
 	switch c.Type {
-	case provider.TypeOpenAI:
+	case catwalk.TypeOpenAI:
 		baseURL, _ := resolver.ResolveValue(c.BaseURL)
 		if baseURL == "" {
 			baseURL = "https://api.openai.com/v1"
 		}
 		testURL = baseURL + "/models"
 		headers["Authorization"] = "Bearer " + apiKey
-	case provider.TypeAnthropic:
+	case catwalk.TypeAnthropic:
 		baseURL, _ := resolver.ResolveValue(c.BaseURL)
 		if baseURL == "" {
 			baseURL = "https://api.anthropic.com/v1"

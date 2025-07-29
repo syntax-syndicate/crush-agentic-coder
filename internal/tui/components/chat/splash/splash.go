@@ -10,16 +10,15 @@ import (
 	"github.com/charmbracelet/bubbles/v2/key"
 	"github.com/charmbracelet/bubbles/v2/spinner"
 	tea "github.com/charmbracelet/bubbletea/v2"
+	"github.com/charmbracelet/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/fur/provider"
 	"github.com/charmbracelet/crush/internal/llm/prompt"
 	"github.com/charmbracelet/crush/internal/tui/components/chat"
-	"github.com/charmbracelet/crush/internal/tui/components/completions"
 	"github.com/charmbracelet/crush/internal/tui/components/core"
 	"github.com/charmbracelet/crush/internal/tui/components/core/layout"
-	"github.com/charmbracelet/crush/internal/tui/components/core/list"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/models"
 	"github.com/charmbracelet/crush/internal/tui/components/logo"
+	"github.com/charmbracelet/crush/internal/tui/exp/list"
 	"github.com/charmbracelet/crush/internal/tui/styles"
 	"github.com/charmbracelet/crush/internal/tui/util"
 	"github.com/charmbracelet/crush/internal/version"
@@ -86,9 +85,7 @@ func New() Splash {
 	listKeyMap.DownOneItem = keyMap.Next
 	listKeyMap.UpOneItem = keyMap.Previous
 
-	t := styles.CurrentTheme()
-	inputStyle := t.S().Base.Padding(0, 1, 0, 1)
-	modelList := models.NewModelListComponent(listKeyMap, inputStyle, "Find your fave")
+	modelList := models.NewModelListComponent(listKeyMap, "Find your fave", false)
 	apiKeyInput := models.NewAPIKeyInput()
 
 	return &splashCmp{
@@ -109,7 +106,7 @@ func (s *splashCmp) SetOnboarding(onboarding bool) {
 		if err != nil {
 			return
 		}
-		filteredProviders := []provider.Provider{}
+		filteredProviders := []catwalk.Provider{}
 		simpleProviders := []string{
 			"anthropic",
 			"openai",
@@ -143,9 +140,11 @@ func (s *splashCmp) Init() tea.Cmd {
 
 // SetSize implements SplashPage.
 func (s *splashCmp) SetSize(width int, height int) tea.Cmd {
+	wasSmallScreen := s.isSmallScreen()
+	rerenderLogo := width != s.width
 	s.height = height
-	if width != s.width {
-		s.width = width
+	s.width = width
+	if rerenderLogo || wasSmallScreen != s.isSmallScreen() {
 		s.logoRendered = s.logoBlock()
 	}
 	// remove padding, logo height, gap, title space
@@ -193,17 +192,18 @@ func (s *splashCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, s.saveAPIKeyAndContinue(s.apiKeyValue)
 			}
 			if s.isOnboarding && !s.needsAPIKey {
-				modelInx := s.modelList.SelectedIndex()
-				items := s.modelList.Items()
-				selectedItem := items[modelInx].(completions.CompletionItem).Value().(models.ModelOption)
+				selectedItem := s.modelList.SelectedModel()
+				if selectedItem == nil {
+					return s, nil
+				}
 				if s.isProviderConfigured(string(selectedItem.Provider.ID)) {
-					cmd := s.setPreferredModel(selectedItem)
+					cmd := s.setPreferredModel(*selectedItem)
 					s.isOnboarding = false
 					return s, tea.Batch(cmd, util.CmdHandler(OnboardingCompleteMsg{}))
 				} else {
 					// Provider not configured, show API key input
 					s.needsAPIKey = true
-					s.selectedModel = &selectedItem
+					s.selectedModel = selectedItem
 					s.apiKeyInput.SetProviderName(selectedItem.Provider.Name)
 					return s, nil
 				}
@@ -262,6 +262,9 @@ func (s *splashCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, nil
 			}
 		case key.Matches(msg, s.keyMap.Yes):
+			if s.isOnboarding {
+				return s, nil
+			}
 			if s.needsAPIKey {
 				u, cmd := s.apiKeyInput.Update(msg)
 				s.apiKeyInput = u.(*models.APIKeyInput)
@@ -272,6 +275,9 @@ func (s *splashCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, s.initializeProject()
 			}
 		case key.Matches(msg, s.keyMap.No):
+			if s.isOnboarding {
+				return s, nil
+			}
 			if s.needsAPIKey {
 				u, cmd := s.apiKeyInput.Update(msg)
 				s.apiKeyInput = u.(*models.APIKeyInput)
@@ -311,7 +317,7 @@ func (s *splashCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (s *splashCmp) saveAPIKeyAndContinue(apiKey string) tea.Cmd {
 	if s.selectedModel == nil {
-		return util.ReportError(fmt.Errorf("no model selected"))
+		return nil
 	}
 
 	cfg := config.Get()
@@ -405,7 +411,7 @@ func (s *splashCmp) setPreferredModel(selectedItem models.ModelOption) tea.Cmd {
 	return nil
 }
 
-func (s *splashCmp) getProvider(providerID provider.InferenceProvider) (*provider.Provider, error) {
+func (s *splashCmp) getProvider(providerID catwalk.InferenceProvider) (*catwalk.Provider, error) {
 	providers, err := config.Providers()
 	if err != nil {
 		return nil, err
@@ -420,7 +426,7 @@ func (s *splashCmp) getProvider(providerID provider.InferenceProvider) (*provide
 
 func (s *splashCmp) isProviderConfigured(providerID string) bool {
 	cfg := config.Get()
-	if _, ok := cfg.Providers[providerID]; ok {
+	if _, ok := cfg.Providers.Get(providerID); ok {
 		return true
 	}
 	return false
@@ -489,9 +495,7 @@ func (s *splashCmp) View() string {
 		})
 
 		buttons := lipgloss.JoinHorizontal(lipgloss.Left, yesButton, "  ", noButton)
-		infoSection := s.infoSection()
-
-		remainingHeight := s.height - lipgloss.Height(s.logoRendered) - (SplashScreenPaddingY * 2) - lipgloss.Height(infoSection)
+		remainingHeight := s.height - lipgloss.Height(s.logoRendered) - (SplashScreenPaddingY * 2)
 
 		initContent := t.S().Base.AlignVertical(lipgloss.Bottom).PaddingLeft(1).Height(remainingHeight).Render(
 			lipgloss.JoinVertical(
@@ -505,7 +509,7 @@ func (s *splashCmp) View() string {
 		content = lipgloss.JoinVertical(
 			lipgloss.Left,
 			s.logoRendered,
-			infoSection,
+			"",
 			initContent,
 		)
 	} else {
@@ -541,9 +545,19 @@ func (s *splashCmp) Cursor() *tea.Cursor {
 	return nil
 }
 
+func (s *splashCmp) isSmallScreen() bool {
+	// Consider a screen small if either the width is less than 40 or if the
+	// height is less than 20
+	return s.width < 55 || s.height < 20
+}
+
 func (s *splashCmp) infoSection() string {
 	t := styles.CurrentTheme()
-	return t.S().Base.PaddingLeft(2).Render(
+	infoStyle := t.S().Base.PaddingLeft(2)
+	if s.isSmallScreen() {
+		infoStyle = infoStyle.MarginTop(1)
+	}
+	return infoStyle.Render(
 		lipgloss.JoinVertical(
 			lipgloss.Left,
 			s.cwd(),
@@ -556,14 +570,25 @@ func (s *splashCmp) infoSection() string {
 
 func (s *splashCmp) logoBlock() string {
 	t := styles.CurrentTheme()
-	return t.S().Base.Padding(0, 2).Width(s.width).Render(
+	logoStyle := t.S().Base.Padding(0, 2).Width(s.width)
+	if s.isSmallScreen() {
+		// If the width is too small, render a smaller version of the logo
+		// NOTE: 20 is not correct because [splashCmp.height] is not the
+		// *actual* window height, instead, it is the height of the splash
+		// component and that depends on other variables like compact mode and
+		// the height of the editor.
+		return logoStyle.Render(
+			logo.SmallRender(s.width - logoStyle.GetHorizontalFrameSize()),
+		)
+	}
+	return logoStyle.Render(
 		logo.Render(version.Version, false, logo.Opts{
 			FieldColor:   t.Primary,
 			TitleColorA:  t.Secondary,
 			TitleColorB:  t.Primary,
 			CharmColor:   t.Secondary,
 			VersionColor: t.Primary,
-			Width:        s.width - 4,
+			Width:        s.width - logoStyle.GetHorizontalFrameSize(),
 		}),
 	)
 }
@@ -582,7 +607,7 @@ func (s *splashCmp) moveCursor(cursor *tea.Cursor) *tea.Cursor {
 		cursor.Y += offset
 		cursor.X = cursor.X + 1
 	} else if s.isOnboarding {
-		offset := logoHeight + SplashScreenPaddingY + s.logoGap() + 3
+		offset := logoHeight + SplashScreenPaddingY + s.logoGap() + 2
 		cursor.Y += offset
 		cursor.X = cursor.X + 1
 	}

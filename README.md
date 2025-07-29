@@ -1,38 +1,100 @@
-> [!WARNING]
-> 🚧 This is a pre-release under heavy, active development. Things are still in flux but we’re excited to share early progress.
-
 # Crush
 
-<p>
+<p align="center">
+    <a href="https://stuff.charm.sh/crush/charm-crush.png"><img width="450" alt="Charm Crush Logo" src="https://github.com/user-attachments/assets/adc1a6f4-b284-4603-836c-59038caa2e8b" /></a><br />
     <a href="https://github.com/charmbracelet/crush/releases"><img src="https://img.shields.io/github/release/charmbracelet/crush" alt="Latest Release"></a>
     <a href="https://github.com/charmbracelet/crush/actions"><img src="https://github.com/charmbracelet/crush/workflows/build/badge.svg" alt="Build Status"></a>
 </p>
 
-Crush is a tool for building software with AI.
+<p align="center">Your new coding bestie, now available in your favourite terminal.<br />Your tools, your code, and your workflows, wired into your LLM of choice.</p>
+
+<p align="center"><img width="800" alt="Crush Demo" src="https://github.com/user-attachments/assets/58280caf-851b-470a-b6f7-d5c4ea8a1968" /></p>
+
+## Features
+
+- **Multi-Model:** choose from a wide range of LLMs or add your own via OpenAI- or Anthropic-compatible APIs
+- **Flexible:** switch LLMs mid-session while preserving context
+- **Session-Based:** maintain multiple work sessions and contexts per project
+- **LSP-Enhanced:** Crush uses LSPs for additional context, just like you do
+- **Extensible:** add capabilities via MCPs (`http`, `stdio`, and `sse`)
+- **Works Everywhere:** first-class support in every terminal on macOS, Linux, Windows (PowerShell and WSL), and FreeBSD
 
 ## Installation
 
-Nightly builds are available while Crush is in development.
+Use a package manager:
 
-- [Packages](https://github.com/charmbracelet/crush/releases/tag/nightly) are available in Debian and RPM formats
-- [Binaries](https://github.com/charmbracelet/crush/releases/tag/nightly) are available for Linux and macOS
+```bash
+# macOS or Linux
+brew install charmbracelet/tap/crush
 
-You can also just install it with go:
+# NPM
+npm install -g @charmland/crush
+
+# Arch Linux (btw)
+yay -S crush-bin
+
+# Windows (with Winget)
+winget install charmbracelet.crush
+
+# Nix
+nix-shell -p nur.repos.charmbracelet.crush
+```
+
+<details>
+<summary><strong>Debian/Ubuntu</strong></summary>
+
+```bash
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list
+sudo apt update && sudo apt install crush
+```
+
+</details>
+
+<details>
+<summary><strong>Fedora/RHEL</strong></summary>
+
+```bash
+echo '[charm]
+name=Charm
+baseurl=https://repo.charm.sh/yum/
+enabled=1
+gpgcheck=1
+gpgkey=https://repo.charm.sh/yum/gpg.key' | sudo tee /etc/yum.repos.d/charm.repo
+sudo yum install crush
+```
+
+</details>
+
+Or, download it:
+
+- [Packages][releases] are available in Debian and RPM formats
+- [Binaries][releases] are available for Linux, macOS, Windows, FreeBSD, OpenBSD, and NetBSD
+
+[releases]: https://github.com/charmbracelet/crush/releases
+
+Or just install it with go:
 
 ```
-git clone git@github.com:charmbracelet/crush.git
-cd crush
-go install
+go install github.com/charmbracelet/crush@latest
 ```
 
-Note that Crush doesn't support Windows yet, however Windows support is planned and in progress.
+> [!WARNING]
+> Productivity may increase when using Crush and you may find yourself nerd
+> sniped when first using the application. If the symptoms persist, join the
+> [Discord][discord] and nerd snipe the rest of us.
 
 ## Getting Started
 
-For now, the quickest way to get started is to set an environment variable for
-your preferred provider. Note that you can switch between providers mid-
-sessions, so you're welcome to set environment variables for multiple
-providers.
+The quickest way to get started is to grab an API key for your preferred
+provider such as Anthropic, OpenAI, Groq, or OpenRouter and just start
+Crush. You'll be prompted to enter your API key.
+
+That said, you can also set environment variables for preferred providers.
+
+<details>
+<summary><strong>Supported Environment Variables</strong></summary>
 
 | Environment Variable       | Provider                                           |
 | -------------------------- | -------------------------------------------------- |
@@ -49,17 +111,31 @@ providers.
 | `AZURE_OPENAI_API_KEY`     | Azure OpenAI models (optional when using Entra ID) |
 | `AZURE_OPENAI_API_VERSION` | Azure OpenAI models                                |
 
+</details>
+
 ## Configuration
 
-For many use cases, Crush can be run with no config. That said, if you do need config, it can be added either local to the project itself, or globally. Configuration has the following priority:
+Crush runs great with no configuration. That said, if you do need or want to
+customize Crush, configuration can be added either local to the project itself,
+or globally, with the following priority:
 
-1. `.crush.json`
-2. `crush.json`
+1. `./.crush.json`
+2. `./crush.json`
 3. `$HOME/.config/crush/crush.json`
+
+Configuration itself is stored as a JSON object:
+
+```json
+{
+   "this-setting": { }
+   "that-setting": { }
+}
+```
 
 ### LSPs
 
-Crush can use LSPs for additional context to help inform its decisions, just like you would. LSPs can be added manually like so:
+Crush can use LSPs for additional context to help inform its decisions, just
+like you would. LSPs can be added manually like so:
 
 ```json
 {
@@ -72,7 +148,7 @@ Crush can use LSPs for additional context to help inform its decisions, just lik
       "args": ["--stdio"]
     },
     "nix": {
-      "command": "alejandra"
+      "command": "nil"
     }
   }
 }
@@ -80,40 +156,84 @@ Crush can use LSPs for additional context to help inform its decisions, just lik
 
 ### MCPs
 
-Crush can also use MCPs for additional context. Add LSPs to the config like so:
+Crush also supports Model Context Protocol (MCP) servers through three
+transport types: `stdio` for command-line servers, `http` for HTTP endpoints,
+and `sse` for Server-Sent Events. Environment variable expansion is supported
+using `$(echo $VAR)` syntax.
 
 ```json
 {
   "mcp": {
-    "context7": {
-      "url": "https://mcp.context7.com/mcp",
-      "type": "http"
+    "filesystem": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/path/to/mcp-server.js"],
+      "env": {
+        "NODE_ENV": "production"
+      }
     },
     "github": {
       "type": "http",
-      "url": "https://api.githubcopilot.com/mcp/",
+      "url": "https://example.com/mcp/",
       "headers": {
-        "Authorization": "$(echo Bearer $GH_MCP_TOKEN)"
+        "Authorization": "$(echo Bearer $EXAMPLE_MCP_TOKEN)"
+      }
+    },
+    "streaming-service": {
+      "type": "sse",
+      "url": "https://example.com/mcp/sse",
+      "headers": {
+        "API-Key": "$(echo $API_KEY)"
       }
     }
   }
 }
 ```
 
-### OpenAI-Compatible APIs
+### Whitelisting Tools
 
-Crush supports all OpenAI-compatible APIs. Here's an example configuration for Deepseek, which uses an OpenAI-compatible API. Don't forget to set `DEEPSEEK_API_KEY` in your environment.
+By default, Crush will ask you for permission before running tool calls. If
+you'd like, you can whitelist tools to be executed without prompting you for
+permissions. Use this with care.
+
+```json
+{
+  "permissions": {
+    "allowed_tools": [
+      "view",
+      "ls",
+      "grep",
+      "edit",
+      "mcp_context7_get-library-doc"
+    ]
+  }
+}
+```
+
+You can also skip all permission prompts entirely by running Crush with the
+`--yolo` flag. Be very, very careful with this feature.
+
+### Custom Providers
+
+Crush supports custom provider configurations for both OpenAI-compatible and
+Anthropic-compatible APIs.
+
+#### OpenAI-Compatible APIs
+
+Here’s an example configuration for Deepseek, which uses an OpenAI-compatible
+API. Don't forget to set `DEEPSEEK_API_KEY` in your environment.
 
 ```json
 {
   "providers": {
     "deepseek": {
-      "provider_type": "openai",
+      "type": "openai",
       "base_url": "https://api.deepseek.com/v1",
+      "api_key": "$DEEPSEEK_API_KEY",
       "models": [
         {
           "id": "deepseek-chat",
-          "model": "Deepseek V3",
+          "name": "Deepseek V3",
           "cost_per_1m_in": 0.27,
           "cost_per_1m_out": 1.1,
           "cost_per_1m_in_cached": 0.07,
@@ -127,23 +247,89 @@ Crush supports all OpenAI-compatible APIs. Here's an example configuration for D
 }
 ```
 
+#### Anthropic-Compatible APIs
+
+Custom Anthropic-compatible providers follow this format:
+
+```json
+{
+  "providers": {
+    "custom-anthropic": {
+      "type": "anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "api_key": "$ANTHROPIC_API_KEY",
+      "extra_headers": {
+        "anthropic-version": "2023-06-01"
+      },
+      "models": [
+        {
+          "id": "claude-sonnet-4-20250514",
+          "name": "Claude Sonnet 4",
+          "cost_per_1m_in": 3,
+          "cost_per_1m_out": 15,
+          "cost_per_1m_in_cached": 3.75,
+          "cost_per_1m_out_cached": 0.3,
+          "context_window": 200000,
+          "default_max_tokens": 50000,
+          "can_reason": true,
+          "supports_attachments": true
+        }
+      ]
+    }
+  }
+}
+```
+
+## Logging
+
+Sometimes you need to look at logs. Luckily, Crush logs all sorts of
+stuff. Logs are stored in `./.crush/logs/crush.log` relative to the project.
+
+The CLI also contains some helper commands to make perusing recent logs easier:
+
+```bash
+# Print the last 1000 lines
+crush logs
+
+# Print the last 500 lines
+crush logs --tail 500
+
+# Follow logs in real time
+crush logs --follow
+```
+
+Want more logging? Run `crush` with the `--debug` flag, or enable it in the
+config:
+
+```json
+{
+  "options": {
+    "debug": true,
+    "debug_lsp": true
+  }
+}
+```
+
 ## Whatcha think?
 
-We’d love to hear your thoughts on this project. Feel free to drop us a note!
+We’d love to hear your thoughts on this project. Need help? We gotchu. You can find us on:
 
 - [Twitter](https://twitter.com/charmcli)
+- [Discord][discord]
+- [Slack](https://charm.land/slack)
 - [The Fediverse](https://mastodon.social/@charmcli)
-- [Discord](https://charm.sh/chat)
+
+[discord]: https://charm.land/discord
 
 ## License
 
-[MIT](https://github.com/charmbracelet/crush/raw/main/LICENSE)
+[FSL-1.1-MIT](https://github.com/charmbracelet/crush/raw/main/LICENSE)
 
 ---
 
 Part of [Charm](https://charm.land).
 
-<a href="https://charm.sh/"><img alt="The Charm logo" width="400" src="https://stuff.charm.sh/charm-banner-next.jpg" /></a>
+<a href="https://charm.land/"><img alt="The Charm logo" width="400" src="https://stuff.charm.sh/charm-banner-next.jpg" /></a>
 
 <!--prettier-ignore-->
 Charm热爱开源 • Charm loves open source
