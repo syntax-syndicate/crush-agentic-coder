@@ -5,20 +5,16 @@ import (
 )
 
 type EditorKeyMap struct {
-	AddFile     key.Binding
 	SendMessage key.Binding
 	OpenEditor  key.Binding
 	Newline     key.Binding
 	Next        key.Binding
 	Previous    key.Binding
+	AttachmentKeyMap
 }
 
 func DefaultEditorKeyMap() EditorKeyMap {
 	return EditorKeyMap{
-		AddFile: key.NewBinding(
-			key.WithKeys("/"),
-			key.WithHelp("/", "add file"),
-		),
 		SendMessage: key.NewBinding(
 			key.WithKeys("enter"),
 			key.WithHelp("enter", "send"),
@@ -35,40 +31,54 @@ func DefaultEditorKeyMap() EditorKeyMap {
 			key.WithHelp("ctrl+j", "newline"),
 		),
 		Next: key.NewBinding(
-			key.WithKeys("ctrl+]"),
-			key.WithHelp("ctrl+]", "next"),
+			key.WithKeys("down"),
+			key.WithHelp("↓", "down"),
 		),
 		Previous: key.NewBinding(
-			key.WithKeys("ctrl+["),
-			key.WithHelp("ctrl+[", "previous"),
+			key.WithKeys("up"),
+			key.WithHelp("↑", "up"),
 		),
+		AttachmentKeyMap: AttachmentKeyMaps,
 	}
 }
 
 // KeyBindings implements layout.KeyMapProvider
 func (k EditorKeyMap) KeyBindings() []key.Binding {
 	return []key.Binding{
-		k.AddFile,
 		k.SendMessage,
 		k.OpenEditor,
 		k.Newline,
 		k.Next,
 		k.Previous,
-		AttachmentsKeyMaps.AttachmentDeleteMode,
-		AttachmentsKeyMaps.DeleteAllAttachments,
-		AttachmentsKeyMaps.Escape,
+		AttachmentKeyMaps.AddFile,
+		AttachmentKeyMaps.AddImage,
+		AttachmentKeyMaps.DeleteAttachment,
+		AttachmentKeyMaps.Escape,
+		AttachmentKeyMaps.DeleteAllAttachments,
 	}
 }
 
-type DeleteAttachmentKeyMaps struct {
+type AttachmentKeyMap struct {
+	AddFile              key.Binding
+	AddImage             key.Binding
+	DeleteAttachment     key.Binding
 	AttachmentDeleteMode key.Binding
 	Escape               key.Binding
 	DeleteAllAttachments key.Binding
 }
 
 // TODO: update this to use the new keymap concepts
-var AttachmentsKeyMaps = DeleteAttachmentKeyMaps{
-	AttachmentDeleteMode: key.NewBinding(
+var AttachmentKeyMaps = AttachmentKeyMap{
+	// TODO I think this conflicts
+	AddFile: key.NewBinding(
+		key.WithKeys("/"),
+		key.WithHelp("/", "add file"),
+	),
+	AddImage: key.NewBinding(
+		key.WithKeys("ctrl+f"),
+		key.WithHelp("ctrl+f", "add image"),
+	),
+	DeleteAttachment: key.NewBinding(
 		key.WithKeys("ctrl+r"),
 		key.WithHelp("ctrl+r+{i}", "delete attachment at index i"),
 	),

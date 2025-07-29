@@ -65,7 +65,7 @@ type editorCmp struct {
 	promptHistoryIndex int
 }
 
-var DeleteKeyMaps = DeleteAttachmentKeyMaps{
+var DeleteKeyMaps = AttachmentKeyMap{
 	AttachmentDeleteMode: key.NewBinding(
 		key.WithKeys("ctrl+r"),
 		key.WithHelp("ctrl+r+{i}", "delete attachment at index i"),
@@ -247,26 +247,10 @@ func (m *editorCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key.Matches(msg, m.keyMap.Newline) {
 			m.textarea.InsertRune('\n')
 		}
-		// history
-		if key.Matches(msg, m.keyMap.Previous) {
-			userMessages, _ := m.getUserMessages(context.Background())
-			if m.promptHistoryIndex == 0 {
-				m.promptHistoryIndex = len(userMessages) - 1
-			} else {
-				m.promptHistoryIndex -= 1
-			}
-			m.textarea.SetValue(userMessages[m.promptHistoryIndex].Content().Text)
+		// History
+		if key.Matches(msg, m.keyMap.Previous) || key.Matches(msg, m.keyMap.Next) {
+			m.textarea.SetValue(m.handleMessageHistory(msg))
 		}
-		if key.Matches(msg, m.keyMap.Next) {
-			userMessages, _ := m.getUserMessages(context.Background())
-			if m.promptHistoryIndex == len(userMessages)-1 {
-				m.promptHistoryIndex = 0
-			} else {
-				m.promptHistoryIndex += 1
-			}
-			m.textarea.SetValue(userMessages[m.promptHistoryIndex].Content().Text)
-		}
-
 		// Handle Enter key
 		if m.textarea.Focused() && key.Matches(msg, m.keyMap.SendMessage) {
 			value := m.textarea.Value()
@@ -480,10 +464,29 @@ func (m *editorCmp) getUserMessages(ctx context.Context) ([]message.Message, err
 	return userMessages, nil
 }
 
+func (m *editorCmp) getUserMessagesAsText(ctx context.Context) ([]string, error) {
+	allMessages, err := m.app.Messages.List(ctx, m.session.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var userMessages []string
+	for _, msg := range allMessages {
+		if msg.Role == message.User {
+			userMessages = append(userMessages, msg.Content().Text)
+		}
+	}
+	return userMessages, nil
+}
+
 func (m *editorCmp) handleMessageHistory(msg tea.KeyMsg) string {
 	ctx := context.Background()
 	// TODO don't ignore errors
-	userMessages, _ := m.getUserMessages(ctx)
+	userMessages, err := m.getUserMessagesAsText(ctx)
+	if err != nil {
+		return "" // Do nothing.
+	}
+	userMessages = append(userMessages, "") // Give the user a reset option.
 	if len(userMessages) > 0 {
 		if key.Matches(msg, m.keyMap.Previous) {
 			if m.promptHistoryIndex == 0 {
@@ -500,5 +503,5 @@ func (m *editorCmp) handleMessageHistory(msg tea.KeyMsg) string {
 			}
 		}
 	}
-	return userMessages[m.promptHistoryIndex].Content().Text
+	return userMessages[m.promptHistoryIndex]
 }
