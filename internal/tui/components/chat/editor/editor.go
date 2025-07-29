@@ -510,7 +510,6 @@ func (m *editorCmp) getUserMessagesAsText(ctx context.Context) ([]string, error)
 
 func (m *editorCmp) handleMessageHistory(msg tea.KeyMsg) string {
 	ctx := context.Background()
-	// TODO don't ignore errors
 	userMessages, err := m.getUserMessagesAsText(ctx)
 	if err != nil {
 		return "" // Do nothing.

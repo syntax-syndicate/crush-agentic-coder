@@ -69,7 +69,9 @@ type AttachmentKeyMap struct {
 
 // TODO: update this to use the new keymap concepts
 var AttachmentKeyMaps = AttachmentKeyMap{
-	// TODO I think this conflicts
+	// TODO Bindings()and Help() both set keybinds for chatPage. This causes new
+	// key bindings defined in the keys.go file for page/chat to not be
+	// respected. Needs to be fixed before we can properly add keybinds here.
 	AddFile: key.NewBinding(
 		key.WithKeys("/"),
 		key.WithHelp("/", "add file"),
