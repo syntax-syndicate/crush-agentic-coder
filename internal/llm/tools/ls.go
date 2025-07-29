@@ -274,7 +274,12 @@ func createFileTree(sortedPaths []string, rootPath string) []*TreeNode {
 func printTree(tree []*TreeNode, rootPath string) string {
 	var result strings.Builder
 
-	result.WriteString(fmt.Sprintf("- %s%s\n", rootPath, string(filepath.Separator)))
+	result.WriteString("- ")
+	result.WriteString(rootPath)
+	if rootPath[len(rootPath)-1] != '/' {
+		result.WriteByte(filepath.Separator)
+	}
+	result.WriteByte('\n')
 
 	for _, node := range tree {
 		printNode(&result, node, 1)
