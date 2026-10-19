@@ -188,6 +188,11 @@ type Model struct {
 	CatwalkCfg catwalk.Model
 	ModelCfg   config.SelectedModel
 	FlatRate   bool
+	// OAuth is true when the provider signs in by OAuth, so a rejected
+	// credential calls for a new sign-in rather than a config change.
+	OAuth bool
+	// ProviderName is the provider's display name, such as "GitHub Copilot".
+	ProviderName string
 }
 
 // activeCancel wraps a context.CancelFunc with a unique pointer identity.
@@ -1144,12 +1149,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	}
 
 	if err != nil {
-		isHyper := largeModel.ModelCfg.Provider == hyper.Name
 		isCancelErr := errors.Is(err, context.Canceled)
 		slog.Info("Agent stream returned error",
 			"error", err.Error(),
 			"error_type", fmt.Sprintf("%T", err),
-			"is_hyper", isHyper,
+			"oauth", largeModel.OAuth,
 			"is_cancel", isCancelErr)
 		if currentAssistant == nil {
 			// Cancel-before-assistant-creation window: the run was
@@ -1179,8 +1183,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			// Checked before the provider branches so a deadline our own
 			// request timeout imposed is never reported as a provider error.
 			currentAssistant.AddFinish(message.FinishReasonError, "Request timed out", requestTimedOutErr.userMessage())
-		} else if isHyper && errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusUnauthorized {
-			currentAssistant.AddFinish(message.FinishReasonError, "Unauthorized", `Please re-authenticate with Hyper. You can also run "crush auth" to re-authenticate.`)
+		} else if largeModel.OAuth && errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusUnauthorized {
+			currentAssistant.AddFinish(message.FinishReasonError, "Unauthorized", signInAgainMessage(largeModel))
 		} else if errors.As(err, &providerErr) {
 			if providerErr.Message == "The requested model is not supported." {
 				url := "https://github.com/settings/copilot/features"
@@ -2346,4 +2350,12 @@ func sanitizeToolInput(toolName, toolCallID, input string) (string, bool) {
 		return "{}", true
 	}
 	return input, false
+}
+
+// signInAgainMessage tells the user how to replace a credential the provider
+// refused after a refresh.
+func signInAgainMessage(m Model) string {
+	name := cmp.Or(m.ProviderName, m.ModelCfg.Provider)
+	return fmt.Sprintf("Please sign in to %s again. You can also run \"crush login %s --force\".",
+		name, m.ModelCfg.Provider)
 }
