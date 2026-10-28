@@ -192,9 +192,18 @@ func (h *e2eHarness) postHostTheme(t *testing.T, ctx context.Context, workspaceI
 // nextHostTheme returns the next host theme event on evc.
 func nextHostTheme(t *testing.T, ctx context.Context, evc <-chan any) pubsub.Event[proto.HostThemeState] {
 	t.Helper()
+	return nextHostThemeChange(t, ctx, evc, nil)
+}
+
+// nextHostThemeChange returns the next host theme event on evc, skipping
+// updates that repeat current.
+func nextHostThemeChange(t *testing.T, ctx context.Context, evc <-chan any, current *proto.HostTheme) pubsub.Event[proto.HostThemeState] {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	ev, ok := drainUntil[pubsub.Event[proto.HostThemeState]](ctx, evc, nil)
+	ev, ok := drainUntil(ctx, evc, func(ev pubsub.Event[proto.HostThemeState]) bool {
+		return current == nil || !current.Equal(ev.Payload.Theme)
+	})
 	require.True(t, ok, "expected a host_theme event")
 	return ev
 }
@@ -223,13 +232,13 @@ func TestE2E_HostThemeBroadcast(t *testing.T) {
 		require.True(t, first.Equal(ev.Payload.Theme))
 	}
 
-	// The same theme again is a no-op: the next event either client sees
-	// is the second theme, not a duplicate of the first.
+	// The attach replay can race the first post and deliver it twice, so
+	// skip repeats as clients do; TestSetHostTheme covers the no-op.
 	h.postHostTheme(t, ctx, h.workspace.ID, first.Clone())
 	second := &proto.HostTheme{Name: "second", Palette: map[string]string{"primary": "#FF60FF"}}
 	h.postHostTheme(t, ctx, h.workspace.ID, second)
 	for _, evc := range []<-chan any{evcA, evcB} {
-		ev := nextHostTheme(t, ctx, evc)
+		ev := nextHostThemeChange(t, ctx, evc, first)
 		require.Equal(t, "second", ev.Payload.Theme.Name)
 	}
 
